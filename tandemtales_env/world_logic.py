@@ -190,9 +190,10 @@ class TT_equality:
     def test_in(self, state):
         l_fact = state.facts[self.lhs.index]
         r_fact = state.facts[self.rhs.index] if isinstance(self.rhs, TT_variable) else self.rhs
-        if l_fact.domain_id != r_fact.domain_id:
-            l_fact, r_fact = l_fact.value, r_fact.value
         return l_fact == r_fact
+        # if l_fact.domain_id != r_fact.domain_id:
+        #     raise RuntimeError('this should not be possible')
+        #     l_fact, r_fact = l_fact.value, r_fact.value
     def get_equality_tests(self):
         return {self}
     def replace_tests(self, test_refs):
@@ -507,6 +508,56 @@ class WorldModel:
         # self.variable_data = [] # logic_data has visibility, initial_value
         # self.action_data = [] # logic_data has visibility, precondition, effect, consenting
         # self.ending_data = [] # logic_data has precondition
+    def get_var_equality_pairs(self, entry):
+        if entry is None: entry = {'type': 'Constant', 'value': True}
+        if isinstance(entry, list): # effect
+            pairs = set()
+            for part in entry:
+                if 'condition' in part:
+                    result = self.get_var_equality_pairs(part['condition'])
+                    if isinstance(result, set):
+                        pairs |= result
+            return pairs
+        elif entry['type'] in {'Constant', 'Entity'}:
+            return self.get_tt_value(entry)
+        elif entry['type'] == 'Variable':
+            return entry['id']
+        elif entry['type'] == 'Proposition' and entry['operator'] == 'EQUALS':
+            if len(entry['arguments']) != 2: raise TypeError(f'invalid number of arguments to EQUALS: {len(entry["arguments"])}')
+            lhs, rhs = tuple((self.get_var_equality_pairs(a) for a in  entry['arguments']))
+            pairs = set()
+            if isinstance(lhs, int) and isinstance(rhs, int):
+                pairs.add((lhs, rhs))
+            return pairs
+        elif entry['type'] == 'Proposition':
+            processed = tuple((self.get_var_equality_pairs(a) for a in  entry['arguments']))
+            pairs = set()
+            for arg in entry['arguments']:
+                result = self.get_var_equality_pairs(arg)
+                if isinstance(result, set):
+                    pairs |= result
+            return pairs
+        else:
+            raise NotImplementedError(f'unrecognized condition type: {entry["type"]}')
+    def merge_equality_domains(self, json_data, var_domain):
+        pairs = set()
+        for i, variable in enumerate(json_data['variables']):
+            result = self.get_var_equality_pairs(json_data['variable_visibility'][i])
+            if isinstance(result, set): pairs |= result
+        for i, action in enumerate(json_data['actions']):
+            result = self.get_var_equality_pairs(json_data['action_effects'][i])
+            if isinstance(result, set): pairs |= result
+            result = self.get_var_equality_pairs(json_data['action_preconditions'][i])
+            if isinstance(result, set): pairs |= result
+            result = self.get_var_equality_pairs(json_data['action_visibility'][i])
+            if isinstance(result, set): pairs |= result
+        for i, ending in enumerate(json_data['endings']):
+            result = self.get_var_equality_pairs(json_data['ending_conditions'][i])
+            if isinstance(result, set): pairs |= result
+        for vi1, vi2 in pairs:
+            merged = var_domain[vi1] | var_domain[vi2]
+            if merged != var_domain[vi1]: var_domain[vi1] |= merged
+            if merged != var_domain[vi2]: var_domain[vi2] |= merged
     def load_universe_from(self, json_data): # goal is to build out domains
         self._entities = []
         for i, entity in enumerate(json_data['entities']):
@@ -524,6 +575,7 @@ class WorldModel:
         for i, effect in enumerate(json_data['action_effects']):
             for part in ([] if effect is None else effect):
                 var_domain[part['variable']['id']].add(self.get_tt_value(part['value']))
+        self.merge_equality_domains(json_data, var_domain)
         domain_to_var = {}
         for var_id, domain in var_domain.items():
             domain_to_var.setdefault(tuple(sorted(domain)), set()).add(var_id)
