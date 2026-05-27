@@ -2,8 +2,8 @@
 
 [Tandem Tales](https://github.com/sgware/tt-server) is a platform for playing
 paired, text-based interactive storytelling games involving a player who makes
-choices for one character and a game master that makes all other choices in the
-narrative.
+choices for one character and a game master (GM) that makes all other choices
+in the narrative.
 
 TandemTalesEnv is a [Gymnasium](https://gymnasium.farama.org/) environment
 which models the cooperative storytelling experience of Tandem Tales as a
@@ -95,14 +95,58 @@ way to broadly define the ideal behaviors or best states of such an experience.
 In accordance with this, TandemTalesEnv aims to make the reward signal
 customizable, with modular components that can react to a variety of events or
 circumstances in the environment and be adapted to specific story worlds.
+This is currently realized through the `RewardHandler` class and its subclasses
+(see `tandemtales_env/envs/tandem_gym.py` for the classes, and `test.py` for
+an example).
+
+## Nondeterministic Transitions
+
+Tandem Tales worlds describe a fully deterministic system of transitions.
+However, since TandemTalesEnv presents the paired storytelling game that is
+played to build stories in those worlds as a single-player environment, the
+role interactions lead to some nondeterminisitc behavior in response to `PASS`
+and `PROPOSE` turns.
+
+When initializing, resetting, or resolving a step in TandemTalesEnv, the
+environment does not return until it is appropriate for the role that is
+expected to interact through step actions (the player if `as_player=True` was
+supplied on initialization, the GM otherwise). If the partner role would be the
+active role following a turn choice (or at the start of a game), turns are
+chosen for the partner until that role is no longer the active one. Any
+observations, rendering, and other information are determined once the partner
+role is no longer the active one also.
+
+The implications of this design differ significantly depending on which role
+is interacting through the environment interface, since (following Tandem
+Tales) control returns to the GM after every player turn. After the GM takes a
+`PROPOSE` turn, the player has a chance to take the corresponding `SUCCEED` or
+`FAIL` turn to decide the outcome, and control returns to the GM. The player
+has a chance to take a `PROPOSE` turn after the GM takes a `PASS` turn, but the
+GM retains control after deciding between the corresponding `SUCCEED` or `FAIL`
+turn.
+
+A `PASS` by the GM always leads to either a `PASS` or `PROPOSE` from the
+player. Exactly which player-controlled action becomes possible to `SUCCEED`
+is nondeterminisitic, but all of them can also be refused with a `FAIL`.
+Those player-controlled actions that the GM can propose directly are also
+subject to a possibility of failure by the player partner.
+
+From a player perspective, all choices always have a partner-determined
+outcome.
+
+The nature of this nondeterminisitc behavior can be changed by supplying
+a custom policy through the `partner_behavior` environment creation argument.
+Currently, the agent is expected to implement the `PartnerAgent` interface
+(see `tandemtales_env/envs/tandem_gym.py`).
 
 ## Arguments
 
 `world_model` the world model file or WorldModel object of the world to play in
 (required).
 
-`render_mode` currently `only` None (no rendering, the default) and `ansi` are
-supported (the latter poorly), but `human` will also be enabled.
+`render_mode` the supported render modes are `None` (no rendering), `ansi`
+(text rendering via `env.render()`) and `human` (automatic text rendering).
+Defaults to `None`.
 
 `allow_invalid` if `False` (the default) invalid actions will raise an exception.
 

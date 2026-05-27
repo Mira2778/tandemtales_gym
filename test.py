@@ -39,7 +39,24 @@ def do_episode(env, agent, show=False, seed=None):
 if __name__ == '__main__':
     def main(args):
         rewarder = tandem_gym.RewardHandler()
-        rewarder += tandem_gym.EndingScorer({'becameMonarch(Adventurer)': 100, 'playerDied()': -100, 'softlocked()': -100}, 50)
+        ending_rewards = {}
+        if 'tutorial' in args.model_file and args.player:
+            ending_rewards = { 'bought(Coffee)': 50, 'bought(Tea)': 0,
+                'free(Coffee)': 50, 'free(Tea)': 0, 'donation()': -50}
+        elif 'tutorial' in args.model_file:
+            ending_rewards = { 'bought(Coffee)': 50, 'bought(Tea)': 50,
+                'free(Coffee)': -50, 'free(Tea)': -50, 'donation()': 0}
+        elif 'crown' in args.model_file and args.player:
+            ending_rewards = {
+                'becameMonarch(Adventurer)': 100, 'becameMonarch(Alchemist)': -50,
+                'becameMonarch(Bandit)': -50, 'becameMonarch(Guard)': -50,
+                'becameMonarch(Heir)': 0, 'playerDied()': -100, 'softlocked()': -100}
+        elif 'crown' in args.model_file:
+            ending_rewards = {
+                'becameMonarch(Adventurer)': 50, 'becameMonarch(Alchemist)': 50,
+                'becameMonarch(Bandit)': 50, 'becameMonarch(Guard)': 50,
+                'becameMonarch(Heir)': 50, 'playerDied()': -100, 'softlocked()': -100}
+        rewarder += tandem_gym.EndingScorer(ending_rewards, 0)
         rewarder += tandem_gym.RewardPass(GM=5, player=-10)
         rewarder += tandem_gym.RewardReplyYes(GM=5, player=5)
         rewarder += tandem_gym.RewardOfferYes(GM=-10)
@@ -49,14 +66,15 @@ if __name__ == '__main__':
         player_first = not args.player if args.second else args.player
         print(f'PLAYER goes {"first" if player_first else "second"}.')
         env = gym.make('tandemtales_env/TandemTalesEnv-v0', world_model=args.model_file, render_mode='ansi',
-            as_player=args.player, player_first=player_first, reward_handler=rewarder)#(action_rewards, ending_rewards))
-        totals = []
-        for i in range(2000):
-            r = do_episode(env, RandomAgent(), show=False, seed=i)
-            totals.append(r)
+            as_player=args.player, player_first=player_first, reward_handler=rewarder)
+        total_reward = 0
+        test_episodes = 2000
+        for i in range(test_episodes):
+            total_reward += do_episode(env, RandomAgent(), show=False, seed=i)
+        if test_episodes > 0:
+            print('average reward:', total_reward/test_episodes)
         for i in range(5):
             r = do_episode(env, RandomAgent(), show=True)
-        print('average reward:', sum(totals)/len(totals))
         env.close()
         return 0
 

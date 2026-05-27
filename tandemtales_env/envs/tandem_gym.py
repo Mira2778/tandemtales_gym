@@ -202,6 +202,8 @@ class TandemTalesEnv(gym.Env):
         self.rewarder.on_reset(self.game, self.learner_role)
         observation = self._get_obs()
         info = self._get_info()
+        if self.render_mode == 'human':
+            self._render_frame()
         return observation, info
     def _get_obs(self):
         turn_vector = np.array([0, 1] if self.game.mode == 'REPLY' else [1, 0])
@@ -249,9 +251,34 @@ class TandemTalesEnv(gym.Env):
             return self._render_frame()
     def _render_frame(self):
         if self.render_mode == 'ansi':
-            return " ".join(self.learner_view.describe_turns())
+            turns = self.learner_view.describe_turns()
+            if not self.game.running():
+                turns.append(self.learner_view.describe_ending())
+            return " ".join(turns)
         elif self.render_mode == 'human':
-            pass
+            if self.learner_role == self.game._SYSTEM:
+                gm_vec = self.learner_view.get_seen()
+                pl_vec = self.partner_view.get_seen()
+            else:
+                pl_vec = self.learner_view.get_seen()
+                gm_vec = self.partner_view.get_seen()
+            wrong_beliefs = []
+            for i, assignment in enumerate(self.game._world.fact_assignments):
+                if gm_vec[i] != pl_vec[i] and pl_vec[i] and not self.game._world.never_visible[assignment.variable.index]:
+                    wrong_beliefs.append(assignment)
+            print(" ".join(self.learner_view.describe_turns()))
+            # if wrong_beliefs:
+            #     parts = []
+            #     for a in wrong_beliefs:
+            #         desc = self.game._world.describer.get_sentence(a, self.game._SYSTEM) 
+            #         if desc:
+            #             parts.append(desc)
+            #         else:
+            #             parts.append(str(a))
+            #     print(f'\tPlayer wrongly believes: {" ".join(parts)}')
+            if not self.game.running():
+                print(self.learner_view.describe_ending())
+                print()
     def do_partner_steps(self):
         while self.partner_view.can_choose():
             choice = self.partner_agent.choose(self.np_random, self.partner_view)

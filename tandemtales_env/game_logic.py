@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from operator import attrgetter
 import numpy as np
-from tandemtales_env.world_logic import TT_ending
+from tandemtales_env.world_logic import TT_assign, TT_ending
 
 @dataclass
 class TT_turn:
@@ -51,9 +51,28 @@ class GameView:
         while self.described_index < len(self.game.turns):
             turn_entry = self.game.turns[self.described_index]
             described = self.game._world.describer.get_sentence(turn_entry, self.role)
+            if not self.game.turn_was_visible[self.described_index]:
+                described = f'({described})'
+            # Player visibility updates
+            changes = []
+            discovery = self.game.discoveries[self.described_index]
+            for assignment in discovery.parts:
+                changes.append(self.game._world.describer.get_sentence(assignment, self.role))
+            extra = ' '.join(changes)
+            if extra and self.role == self.game._PLAYER:
+                described += ' ' + extra
+            elif extra and self.role == self.game._SYSTEM:
+                described += f' (PLAYER SEES: {extra})'
             undescribed_turns.append(described)
             self.described_index += 1
         return undescribed_turns
+    def describe_ending(self):
+        if self.game.running():
+            return None
+        elif self.game.ending is None:
+            return 'The story has concluded without a valid ending.'
+        else:
+            return self.game._world.describer.get_sentence(self.game.ending, self.role)
     def display_turns(self, indent=''):
         for described in self.describe_turns():
             print(f'{indent}{described}')
@@ -88,6 +107,9 @@ class PlayerView(GameView):
     def __init__(self, game):
         super().__init__(game)
         self.role = self.game._PLAYER
+    def get_seen(self):
+        state = self.game.story.visible_states[-1]
+        return self.game._world.get_encoded(state, vis=True)
     def get_turn_codes(self):
         if not self.can_choose(): return np.empty(0, dtype=np.uint)
         if not self.game.offer is None:
@@ -129,11 +151,11 @@ class GameModel:
         self.story = self._world.get_empty_story()
         # self.update_world_action_mask()
         self.turns = []
+        self.turn_was_visible = []
+        self.discoveries = []
+        self.active_role = self._SYSTEM
         if player_first:
             self.commit_turn(self.PASS_ID)
-        self.active_role = self._SYSTEM
-        # self.choice_ids = []
-        # self.update_choices()
         for view in self.views.values(): view.reset()
     def update_world_action_mask(self):
         valid = self._world.get_tt_actions_in(self.story.world_states[-1])
@@ -169,29 +191,6 @@ class GameModel:
         else:
             kind = 'PROPOSE'
         return TT_turn(role, kind, action, replying)
-    def update_choices(self):
-        # 1 + 2*len(self._world._actions) possible choices
-        # 0 <= indexes < len(self._world._actions) are PROPOSE/SUCCEED turns (as appropriate) for the associated action
-        # len(self._world._actions) <= indexes < 2*len(self.world._actions) are FAIL turns for the action associated with the index - len(self.world._actions)
-        # index = len(self._world._actions) is PASS turn
-        self.choice_ids.clear()
-        if self.mode == 'REPLY':
-            self.choice_ids.extend([self.offer.index, self.offer.index + len(self._world._actions)])
-        elif self.active_role == self._SYSTEM:
-            for action in self._world.get_tt_actions_in(self.story.world_states[-1]):
-                if action.system_action:
-                    tkind = 'PROPOSE' if action.player_action else 'SUCCEED'
-                    self.choice_ids.append(action.index)
-                    if not action.player_action:
-                        self.choice_ids.append(action.index + len(self._world._actions))
-            self.choice_ids.append(2*len(self._world._actions))
-        elif self.active_role == self._PLAYER:
-            for action in self._world.get_tt_actions_in(self.story.world_states[-1]):
-                if action.player_action:
-                    self.choice_ids.append(action.index)
-            self.choice_ids.append(2*len(self._world._actions))
-        else:
-            raise NotImplementedError(f'{self.active_role}')
     def commit_turn(self, turn):
         if not self.running(): raise RuntimeError(f'game over, cannot take turns')
         if isinstance(turn, int): turn = self.get_choice_from_id(turn)
@@ -205,5 +204,13 @@ class GameModel:
             self.active_role = self._SYSTEM
         if turn.kind == 'SUCCEED':
             self._world.update_story(self.story, turn.action)
+            was_visible, act_change, discovery = self._world.get_vis_update(self.story)
             # self.update_world_action_mask()
-        # self.update_choices()
+        elif turn.kind == 'FAIL':
+            was_visible = turn.action.visibility.test_in(self.story.world_states[-1])
+            discovery = TT_assign((), ())
+        else:
+            was_visible = True
+            discovery = TT_assign((), ())
+        self.turn_was_visible.append(was_visible)
+        self.discoveries.append(discovery)

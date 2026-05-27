@@ -125,9 +125,12 @@ class TT_domain:
     def __str__(self):
         return f'domain for {", ".join(map(str, self.values))}'
     def get_fact(self, value):
-        if value not in self.values:
-            return None
-        internal_id = self.values.index(value)
+        if isinstance(value, TT_value):
+            if value not in self.values:
+                return None
+            internal_id = self.values.index(value)
+        else:
+            internal_id = value
         flipped = None
         if self.boolean:
             flipped_id = (internal_id + 1)%2
@@ -182,7 +185,7 @@ class TT_variable:
         return result
 
 @dataclass(frozen=True)
-class TT_equality:
+class TT_equality(Proposition):
     lhs : TT_variable
     rhs : TT_variable|TT_fact
     def __str__(self):
@@ -218,7 +221,7 @@ class TT_assignment:
     variable : TT_variable
     fact : TT_fact
     def __str__(self):
-        return f'{var} := {fact}'
+        return f'{self.variable} := {self.fact}'
     def get_context(self):
         result = {'TYPE': 'assignment', 'VALUE': self.fact.value}
         result.update(self.variable.signature.get_context())
@@ -233,6 +236,10 @@ class TT_assign:
     @property
     def parts(self):
         return [TT_assignment(var, fact) for var, fact in zip(self.variables, self.facts)]
+    def is_empty(self):
+        return len(self.facts) == 0
+    def get_indexes(self):
+        return list(map(attrgetter('index'), self.variables)), list(map(attrgetter('code_index'), self.facts))
 
 @dataclass
 class TT_effect:
@@ -322,6 +329,19 @@ class TT_state:
         for var, fact in zip(assigner.variables, assigner.facts):
             new_facts[var.index] = fact
         return TT_state(new_facts)
+
+@dataclass
+class TT_np_state:
+    vector : Sequence[int]
+    world : Any
+    @property
+    def facts(self):
+        return self.world.get_state_facts(self.vector)
+    def state_after(self, assigner):
+        v_is, f_is = assigner.get_indexes()
+        new_vector = self.vector.copy()
+        new_vector[v_is] = f_is
+        return TT_np_state(new_vector, self.world)
 
 @dataclass
 class TT_cached_state:
@@ -427,7 +447,6 @@ class WorldCache:
             self._diffs_2.add((self.get_init_diff(state), self.get_init_diff(next_vis_state)))
             self._vis_states[next_state.index] = next_vis_state
             self._vis_encodings[next_state.index,:] = self._model.get_encoded(next_vis_state, no_cache=True)
-            # self._vis_encodings[next_state.index] = self._model.get_encoded(next_vis_state, no_cache=True)
         known_next[action.index] = next_state.index
         return next_state if wrap else self._states[next_state.index]
 
@@ -601,13 +620,23 @@ class WorldModel:
         self.PC = self._entities[0]
         initial_facts = list(map(lambda v: self.get_tt_fact(v, v.initial), self._variables))
         self._initial = TT_state(initial_facts)
+        self.fact_assignments = []
+        for var in self._variables:
+            domain = self._domains[var.domain_id]
+            for value in domain.values:
+                fact = domain.get_fact(value)
+                self.fact_assignments.append(TT_assignment(var, fact))
+        initial_fcodes = list(map(lambda v: self.get_tt_fact(v, v.initial).code_index, self._variables))
+        # self._initial = TT_np_state(np.array(initial_fcodes), self)
         self._say_once = set()
         self.state_encoding_width = sum([var.width for var in self._variables])
     def load_logic_from(self, json_data):
+        self.never_visible = []
         self._var_visibility = []
         for i, variable in enumerate(json_data['variables']):
             visibility = self.process_tt_condition(json_data['variable_visibility'][i], outer=True)
             self._var_visibility.append(visibility)
+            self.never_visible.append(visibility.trivially_false())
         self._actions = []
         for i, action in enumerate(json_data['actions']):
             effect = self.process_tt_effect(json_data['action_effects'][i])
@@ -642,6 +671,13 @@ class WorldModel:
         #     self._actions[i] = action.replace_tests(self._test_refs)
         # for i, ending in enumerate(self._endings):
         #     self._endings[i] = ending.replace_tests(self._test_refs)
+    def get_state_facts(self, domain_indices):
+        facts = []
+        for variable in self._variables:
+            code_index = domain_indices[variable.index]
+            fact = self._domains[variable.domain_id].get_fact(code_index)
+            facts.append(fact)
+        return facts
     def get_tested_state(self, state):
         return tuple(map(methodcaller('test_in', state), self._stored_tests))
     def load_cache_from(self, cache_data=None):
@@ -771,13 +807,15 @@ class WorldModel:
             return [end for end in self._endings if end.precondition.test_in(state)] # TEST_HERE
         else:
             return self._cache._endings[state.index]
-    def get_encoded(self, state, no_cache=False):
+    def get_encoded(self, state, vis=False, no_cache=False):
         if no_cache or self._cache is None:
             parts = []
             for var in self._variables:
                 domain = self._domains[var.domain_id]
                 parts.append(domain.encodings[state.facts[var.index].code_index])
             return np.concat(parts)
+        elif vis:
+            return self._cache._vis_encodings[state.index,:]
         else:
             return self._cache._encodings[state.index,:]
     def get_initial(self):
@@ -785,6 +823,17 @@ class WorldModel:
             return self._initial
         else:
             return self._cache.get_state(0)
+    def get_vis_changes(self, before, after, action, vis_before, no_cache=False):
+        visible = action.visibility.test_in(before)
+        act_assign = action.effect.resolve_in(before) if visible else TT_assign((), ())
+        update_vars = []
+        update_facts = []
+        for var, visibility in zip(self._variables, self._var_visibility):
+            if var not in act_assign.variables and visibility.test_in(after) and vis_before.facts[var.index] != after.facts[var.index]:
+                update_vars.append(var)
+                update_facts.append(after.facts[var.index])
+        discover_assign = TT_assign(tuple(update_vars), tuple(update_facts))
+        return visible, act_assign, discover_assign
     def get_vis_after(self, before, after, action, vis_before, no_cache=False):
         # if action was visible in before, its assignment is part of the update
         # anything visible in after is also part of the update
@@ -820,7 +869,8 @@ class WorldModel:
         if _checked:
             story.events.append(action)
             next_ws = self._cache.get_next_state(story.world_states[-1], story.events[-1])
-            next_vs = self._cache._vis_states[next_ws.index]
+            #next_vs = self._cache._vis_states[next_ws.index]
+            next_vs = self._cache.get_state(next_ws.index, vis=True)
             story.world_states.append(next_ws)
             story.visible_states.append(next_vs)
             valid_endings = self.get_tt_endings_in(next_ws)
@@ -831,6 +881,9 @@ class WorldModel:
             if action not in actions:
                 raise ValueError(f'{action} is not valid in {story}')
             return self.update_story(story, action, _checked=True)
+    def get_vis_update(self, story, index=None):
+        if index is None: index = len(story.world_states) - 2
+        return self.get_vis_changes(story.world_states[index], story.world_states[index+1], story.events[index], story.visible_states[index])
 
 def load_world_model(path):
     if isinstance(path, str): path = Path(path)
